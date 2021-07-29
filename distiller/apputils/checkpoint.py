@@ -57,12 +57,18 @@ def save_checkpoint(epoch, arch, model, optimizer=None, scheduler=None,
         raise TypeError('extras must be either a dict or None')
 
     filename = 'checkpoint.pth.tar' if name is None else name + '_checkpoint.pth.tar'
+    prue_filename = 'checkpoint.pth' if name is None else name + '_checkpoint.pth'
+
     fullpath = os.path.join(dir, filename)
+    prue_fullpath = os.path.join(dir,  prue_filename)
     msglogger.info("Saving checkpoint to: %s" % fullpath)
     filename_best = 'best.pth.tar' if name is None else name + '_best.pth.tar'
+    prue_filename_best= 'best.pth' if name is None else name + '_best.pth'
     fullpath_best = os.path.join(dir, filename_best)
+    prue_fullpath_best = os.path.join(dir, prue_filename_best)
 
     checkpoint = {'epoch': epoch, 'state_dict': model.state_dict(), 'arch': arch}
+    prue_checkpoint=model.state_dict()
     try:
         checkpoint['is_parallel'] = model.is_parallel
         checkpoint['dataset'] = model.dataset
@@ -83,8 +89,11 @@ def save_checkpoint(epoch, arch, model, optimizer=None, scheduler=None,
 
     checkpoint['extras'] = extras
     torch.save(checkpoint, fullpath)
+    torch.save(prue_checkpoint,prue_fullpath)
     if is_best:
         shutil.copyfile(fullpath, fullpath_best)
+        shutil.copyfile(prue_fullpath, prue_fullpath_best)
+
 
 
 def load_lean_checkpoint(model, chkpt_file, model_device=None):
@@ -106,7 +115,7 @@ def get_contents_table(d):
 
 
 def load_checkpoint(model, chkpt_file, optimizer=None,
-                    model_device=None, lean_checkpoint=False, strict=False):
+                    model_device=None, lean_checkpoint=False, strict=False,still_quantization=True):
     """Load a pytorch training checkpoint.
 
     Args:
@@ -152,7 +161,11 @@ def load_checkpoint(model, chkpt_file, optimizer=None,
             # Initialize the dest_optimizer with a dummy learning rate,
             # this is required to support SGD.__init__()
             dest_optimizer = cls(model.parameters(), lr=1)
-            dest_optimizer.load_state_dict(src_state_dict)
+            if len(src_state_dict['param_groups'])>1:
+                src_state_dict['param_groups'].pop()
+                dest_optimizer.load_state_dict(src_state_dict)
+            else:
+                dest_optimizer.load_state_dict(src_state_dict)
             msglogger.info('Optimizer of type {type} was loaded from checkpoint'.format(
                             type=type(dest_optimizer)))
             optimizer_param_groups = dest_optimizer.state_dict()['param_groups']
@@ -201,7 +214,9 @@ def load_checkpoint(model, chkpt_file, optimizer=None,
         if not model:
             raise ValueError("You didn't provide a model, and the checkpoint %s doesn't contain "
                              "enough information to create one", chkpt_file)
-
+    if lean_checkpoint:
+        msglogger.info("=> loaded 'state_dict' from checkpoint '{}'".format(str(chkpt_file)))
+        return model, None, None, 0
     checkpoint_epoch = checkpoint.get('epoch', None)
     start_epoch = checkpoint_epoch + 1 if checkpoint_epoch is not None else 0
     compression_scheduler = None
@@ -217,38 +232,48 @@ def load_checkpoint(model, chkpt_file, optimizer=None,
             msglogger.warning("Found thinning_recipes key, but missing key compression_scheduler")
             compression_scheduler = distiller.CompressionScheduler(model)
         _load_and_execute_thinning_recipes()
-
-    if 'quantizer_metadata' in checkpoint:
+    optimizer = _load_optimizer()
+# if pruning is after quantizer,then do not skip this!
+    if 'quantizer_metadata' in checkpoint and still_quantization:
         msglogger.info('Loaded quantizer metadata from the checkpoint')
         qmd = checkpoint['quantizer_metadata']
+        if optimizer is not None:
+            qmd['params']['optimizer'] = optimizer
         quantizer = qmd['type'](model, **qmd['params'])
         quantizer.prepare_model(qmd['dummy_input'])
-
-        if qmd.get('pytorch_convert', False):
-            msglogger.info('Converting Distiller PTQ model to PyTorch quantization API')
-            model = quantizer.convert_to_pytorch(qmd['dummy_input'], backend=qmd.get('pytorch_convert_backend', None))
 
     if normalize_dataparallel_keys:
         checkpoint['state_dict'] = {normalize_module_name(k): v for k, v in checkpoint['state_dict'].items()}
     anomalous_keys = model.load_state_dict(checkpoint['state_dict'], strict)
-    if anomalous_keys:
+    missing_keys, unexpected_keys = anomalous_keys
+
+    if missing_keys or unexpected_keys:
         # This is pytorch 1.1+
-        missing_keys, unexpected_keys = anomalous_keys
+        if missing_keys:
+            temp = {}
+            for item in checkpoint['state_dict'].keys():
+                temp['module.' + item] = checkpoint['state_dict'][item]
+            anomalous_keys = model.load_state_dict(temp, strict)
+            missing_keys, unexpected_keys = anomalous_keys
+        if missing_keys:
+            temp = {}
+            for item in checkpoint['state_dict'].keys():
+                temp[item[7:]] = checkpoint['state_dict'][item]
+            anomalous_keys = model.load_state_dict(temp, strict)
+            missing_keys, unexpected_keys = anomalous_keys
         if unexpected_keys:
+            print('unexpected_keys',unexpected_keys)
             msglogger.warning("Warning: the loaded checkpoint (%s) contains %d unexpected state keys" %
                               (chkpt_file, len(unexpected_keys)))
         if missing_keys:
+            print('missing_keys',missing_keys)
             raise ValueError("The loaded checkpoint (%s) is missing %d state keys" %
                              (chkpt_file, len(missing_keys)))
 
     if model_device is not None:
         model.to(model_device)
 
-    if lean_checkpoint:
-        msglogger.info("=> loaded 'state_dict' from checkpoint '{}'".format(str(chkpt_file)))
-        return model, None, None, 0
 
-    optimizer = _load_optimizer()
     msglogger.info("=> loaded checkpoint '{f}' (epoch {e})".format(f=str(chkpt_file),
                                                                    e=checkpoint_epoch))
     _sanity_check()

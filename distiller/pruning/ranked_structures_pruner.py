@@ -22,6 +22,7 @@ import torch
 from torch.nn import functional as f
 from random import uniform
 import distiller
+from .pruner import _ParameterPruner
 
 
 __all__ = ["LpRankedStructureParameterPruner",
@@ -38,12 +39,12 @@ __all__ = ["LpRankedStructureParameterPruner",
 msglogger = logging.getLogger(__name__)
 
 
-class _RankedStructureParameterPruner(object):
+class _RankedStructureParameterPruner(_ParameterPruner):
     """Base class for pruning structures by ranking them.
     """
     def __init__(self, name, group_type, desired_sparsity, weights, 
                  group_dependency=None, group_size=1, rounding_fn=math.floor, noise=0.):
-        self.name = name
+        super().__init__(name)
         self.group_type = group_type
         self.group_dependency = group_dependency
         self.params_names = weights
@@ -124,6 +125,7 @@ class LpRankedStructureParameterPruner(_RankedStructureParameterPruner):
                 raise ValueError("When defining a block pruner you must also specify the block shape")
 
     def prune_group(self, fraction_to_prune, param, param_name, zeros_mask_dict, model=None, binary_map=None):
+
         if fraction_to_prune == 0:
             return
         if self.group_type in ('3D', 'Filters'):
@@ -342,19 +344,14 @@ class ActivationRankedFilterPruner(_RankedStructureParameterPruner):
 
         # Use the parameter name to locate the module that has the activation sparsity statistics
         fq_name = param_name.replace(".conv", ".relu")[:-len(".weight")]
-        distiller.assign_layer_fq_names(model)
         module = distiller.find_module_by_fq_name(model, fq_name)
-        assert module is not None
-
+        if module is None:
+            raise ValueError("Could not find a layer named %s in the model."
+                             "\nMake sure to use assign_layer_fq_names()" % fq_name)
         if not hasattr(module, self.activation_rank_criterion):
-            raise ValueError("Could not find attribute \"%s\" in module %s\n"
-                             "\tThis is pruner uses activation statistics collected during forward-"
-                             "passes of the network.\n"
-                             "\tThis error is an indication that these statistics "
-                             "have not been collected yet.\n"
-                             "\tMake sure to use SummaryActivationStatsCollector(\"%s\")\n"
-                             "\tFor more info see issue #444 (https://github.com/IntelLabs/distiller/issues/444)"%
-                             (self.activation_rank_criterion, fq_name, self.activation_rank_criterion))
+            raise ValueError("Could not find attribute \"{}\" in module %s"
+                             "\nMake sure to use SummaryActivationStatsCollector(\"{}\")".
+                             format(self.activation_rank_criterion, fq_name, self.activation_rank_criterion))
 
         quality_criterion, std = getattr(module, self.activation_rank_criterion).value()
         num_filters = param.size(0)
@@ -473,7 +470,10 @@ class BernoulliFilterPruner(_RankedStructureParameterPruner):
 
 
 class GradientRankedFilterPruner(_RankedStructureParameterPruner):
-    """Rank the importance of weight filters using the product of their gradients and the filter value.
+    """Taylor expansion ranking.
+
+    Pavlo Molchanov, Stephen Tyree, Tero Karras, Timo Aila, and Jan Kautz. Pruning Convolutional Neural
+    Networks for Resource Efficient Inference. ArXiv, abs/1611.06440, 2016.
     """
     def __init__(self, name, group_type, desired_sparsity, weights, group_dependency=None):
         super().__init__(name, group_type, desired_sparsity, weights, group_dependency)
@@ -496,23 +496,22 @@ class GradientRankedFilterPruner(_RankedStructureParameterPruner):
             msglogger.info("Too few filters - can't prune %.1f%% filters", 100*fraction_to_prune)
             return
 
-        # Compute the multiplication of the filters times the filter_gradients
+        # Compute the multiplication of the filters times the filter_gradienrs
         view_filters = param.view(param.size(0), -1)
         view_filter_grads = param.grad.view(param.size(0), -1)
-        with torch.no_grad():
-            weighted_gradients = view_filter_grads * view_filters
-            weighted_gradients = weighted_gradients.sum(dim=1)
+        weighted_gradients = view_filter_grads * view_filters
+        weighted_gradients = weighted_gradients.sum(dim=1)
 
-            # Sort from high to low, and remove the bottom 'num_filters_to_prune' filters
-            filters_ordered_by_gradient = np.argsort(-weighted_gradients.detach().cpu().numpy())[:-num_filters_to_prune]
-            mask, binary_map = _mask_from_filter_order(filters_ordered_by_gradient, param, num_filters, binary_map)
-            zeros_mask_dict[param_name].mask = mask
+        # Sort from high to low, and remove the bottom 'num_filters_to_prune' filters
+        filters_ordered_by_gradient = np.argsort(-weighted_gradients.detach().cpu().numpy())[:-num_filters_to_prune]
+        mask, binary_map = _mask_from_filter_order(filters_ordered_by_gradient, param, num_filters, binary_map)
+        zeros_mask_dict[param_name].mask = mask
 
-            msglogger.info("GradientRankedFilterPruner - param: %s pruned=%.3f goal=%.3f (%d/%d)",
-                           param_name,
-                           distiller.sparsity_3D(zeros_mask_dict[param_name].mask),
-                           fraction_to_prune, num_filters_to_prune, num_filters)
-            return binary_map
+        msglogger.info("GradientRankedFilterPruner - param: %s pruned=%.3f goal=%.3f (%d/%d)",
+                       param_name,
+                       distiller.sparsity_3D(zeros_mask_dict[param_name].mask),
+                       fraction_to_prune, num_filters_to_prune, num_filters)
+        return binary_map
 
 
 from sklearn.linear_model import LinearRegression

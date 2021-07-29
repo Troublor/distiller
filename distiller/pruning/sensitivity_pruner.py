@@ -14,11 +14,12 @@
 # limitations under the License.
 #
 
-
+from .pruner import _ParameterPruner
 import distiller
+import torch
 
 
-class SensitivityPruner(object):
+class SensitivityPruner(_ParameterPruner):
     """Use algorithm from "Learning both Weights and Connections for Efficient
     Neural Networks" - https://arxiv.org/pdf/1506.02626v3.pdf
 
@@ -40,7 +41,7 @@ class SensitivityPruner(object):
     """
 
     def __init__(self, name, sensitivities, **kwargs):
-        self.name = name
+        super(SensitivityPruner, self).__init__(name)
         self.sensitivities = sensitivities
 
     def set_param_mask(self, param, param_name, zeros_mask_dict, meta):
@@ -52,4 +53,13 @@ class SensitivityPruner(object):
         else:
             sensitivity = self.sensitivities[param_name]
 
-        zeros_mask_dict[param_name].mask = distiller.create_mask_sensitivity_criterion(param, sensitivity)
+        zeros_mask_dict[param_name].mask = self.create_mask(param, sensitivity)
+
+    @staticmethod
+    def create_mask(param, sensitivity):
+        if not hasattr(param, 'stddev'):
+            param.stddev = torch.std(param).item()
+        with torch.no_grad():
+            threshold = param.stddev * sensitivity
+            mask = distiller.threshold_mask(param.data, threshold)
+            return mask

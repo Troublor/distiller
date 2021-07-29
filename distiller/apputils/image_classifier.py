@@ -53,13 +53,14 @@ class ClassifierCompressor(object):
         - Checkpoint handling
         - Classifier training, verification and testing
     """
+
     def __init__(self, args, script_dir):
         self.args = copy.deepcopy(args)
         self._infer_implicit_args(self.args)
         self.logdir = _init_logger(self.args, script_dir)
         _config_determinism(self.args)
         _config_compute_device(self.args)
-        
+
         # Create a couple of logging backends.  TensorBoardLogger writes log files in a format
         # that can be read by Google's Tensor Board.  PythonLogger writes to the Python logger.
         if not self.logdir:
@@ -67,8 +68,8 @@ class ClassifierCompressor(object):
         else:
             self.tflogger = TensorBoardLogger(msglogger.logdir)
             self.pylogger = PythonLogger(msglogger)
-        (self.model, self.compression_scheduler, self.optimizer, 
-             self.start_epoch, self.ending_epoch) = _init_learner(self.args)
+        (self.model, self.compression_scheduler, self.optimizer,
+         self.start_epoch, self.ending_epoch) = _init_learner(self.args)
 
         # Define loss function (criterion)
         self.criterion = nn.CrossEntropyLoss().to(self.args.device)
@@ -76,7 +77,7 @@ class ClassifierCompressor(object):
         self.activations_collectors = create_activation_stats_collectors(
             self.model, *self.args.activation_stats)
         self.performance_tracker = apputils.SparsityAccuracyTracker(self.args.num_best_scores)
-    
+
     def load_datasets(self):
         """Load the datasets"""
         if not all((self.train_loader, self.val_loader, self.test_loader)):
@@ -100,7 +101,7 @@ class ClassifierCompressor(object):
     def mock_args():
         """Generate a Namespace based on default arguments"""
         return ClassifierCompressor._infer_implicit_args(
-            init_classifier_compression_arg_parser().parse_args(['fictive_required_arg',]))
+            init_classifier_compression_arg_parser().parse_args(['fictive_required_arg', ]))
 
     @classmethod
     def mock_classifier(cls):
@@ -111,15 +112,15 @@ class ClassifierCompressor(object):
         self.load_datasets()
 
         with collectors_context(self.activations_collectors["train"]) as collectors:
-            top1, top5, loss = train(self.train_loader, self.model, self.criterion, self.optimizer, 
-                                     epoch, self.compression_scheduler, 
+            top1, top5, loss = train(self.train_loader, self.model, self.criterion, self.optimizer,
+                                     epoch, self.compression_scheduler,
                                      loggers=[self.tflogger, self.pylogger], args=self.args)
             if verbose:
                 distiller.log_weights_sparsity(self.model, epoch, [self.tflogger, self.pylogger])
             distiller.log_activation_statistics(epoch, "train", loggers=[self.tflogger],
                                                 collector=collectors["sparsity"])
             if self.args.masks_sparsity:
-                msglogger.info(distiller.masks_sparsity_tbl_summary(self.model, 
+                msglogger.info(distiller.masks_sparsity_tbl_summary(self.model,
                                                                     self.compression_scheduler))
         return top1, top5, loss
 
@@ -132,7 +133,7 @@ class ClassifierCompressor(object):
             top1, top5, loss = self.validate_one_epoch(epoch, verbose)
 
         if self.compression_scheduler:
-            self.compression_scheduler.on_epoch_end(epoch, self.optimizer, 
+            self.compression_scheduler.on_epoch_end(epoch, self.optimizer,
                                                     metrics={'min': loss, 'max': top1})
         return top1, top5, loss
 
@@ -140,7 +141,7 @@ class ClassifierCompressor(object):
         """Evaluate on validation set"""
         self.load_datasets()
         with collectors_context(self.activations_collectors["valid"]) as collectors:
-            top1, top5, vloss = validate(self.val_loader, self.model, self.criterion, 
+            top1, top5, vloss = validate(self.val_loader, self.model, self.criterion,
                                          [self.pylogger], self.args, epoch)
             distiller.log_activation_statistics(epoch, "valid", loggers=[self.tflogger],
                                                 collector=collectors["sparsity"])
@@ -148,9 +149,9 @@ class ClassifierCompressor(object):
 
         if verbose:
             stats = ('Performance/Validation/',
-            OrderedDict([('Loss', vloss),
-                         ('Top1', top1),
-                         ('Top5', top5)]))
+                     OrderedDict([('Loss', vloss),
+                                  ('Top1', top1),
+                                  ('Top5', top5)]))
             distiller.log_training_progress(stats, None, epoch, steps_completed=0,
                                             total_steps=1, log_freq=1, loggers=[self.tflogger])
         return top1, top5, vloss
@@ -180,7 +181,7 @@ class ClassifierCompressor(object):
         if self.start_epoch >= self.ending_epoch:
             msglogger.error(
                 'epoch count is too low, starting epoch is {} but total epochs set to {}'.format(
-                self.start_epoch, self.ending_epoch))
+                    self.start_epoch, self.ending_epoch))
             raise ValueError('Epochs parameter is too low. Nothing to do.')
 
         # Load the datasets lazily
@@ -189,7 +190,7 @@ class ClassifierCompressor(object):
         self.performance_tracker.reset()
         for epoch in range(self.start_epoch, self.ending_epoch):
             msglogger.info('\n')
-            top1, top5, loss = self.train_validate_with_scheduling(epoch)
+            top1, top5, loss = self.train_validate_with_scheduling(epoch)  # mark
             self._finalize_epoch(epoch, top1, top5)
         return self.performance_tracker.perf_scores_history
 
@@ -204,32 +205,47 @@ class ClassifierCompressor(object):
                     self.pylogger, self.activations_collectors, args=self.args)
 
 
-def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
+def init_classifier_compression_arg_parser():
     '''Common classifier-compression application command-line arguments.
     '''
     SUMMARY_CHOICES = ['sparsity', 'compute', 'model', 'modules', 'png', 'png_w_params']
 
     parser = argparse.ArgumentParser(description='Distiller image classification model compression')
-    parser.add_argument('data', metavar='DATASET_DIR', help='path to dataset')
+    parser.add_argument('--quantized', help='quantize or not', default=0, choices=('0', '8', '16'))
+    parser.add_argument('--adv', default=0)
+    parser.add_argument('--adv_eval', default=1)
+    parser.add_argument('--adv_train', default=0)
+    parser.add_argument('--config_path', default=None)
+    parser.add_argument('--constraint', default='2')
+    parser.add_argument('--eps', default=0.5)
+    parser.add_argument('--attack-lr', default=0.1)
+    parser.add_argument('--attack-steps', default=100)
+    parser.add_argument('--use-best', default=1)
+    parser.add_argument('--eps-fadein-epochs', default=0)
+    parser.add_argument('--random-restarts',default=0)
+    parser.add_argument('--no_quantization',action='store_true',
+                        help='if resume from a quant_aware_trained model,if use other compression method,this should be set.'
+                        ,default=False)
+    parser.add_argument('--data', metavar='DIR', help='path to dataset')
     parser.add_argument('--arch', '-a', metavar='ARCH', default='resnet18', type=lambda s: s.lower(),
                         choices=models.ALL_MODEL_NAMES,
                         help='model architecture: ' +
-                        ' | '.join(models.ALL_MODEL_NAMES) +
-                        ' (default: resnet18)')
+                             ' | '.join(models.ALL_MODEL_NAMES) +
+                             ' (default: resnet18)')
     parser.add_argument('-j', '--workers', default=4, type=int, metavar='N',
                         help='number of data loading workers (default: 4)')
     parser.add_argument('--epochs', type=int, metavar='N', default=90,
                         help='number of total epochs to run (default: 90')
     parser.add_argument('-b', '--batch-size', default=256, type=int,
                         metavar='N', help='mini-batch size (default: 256)')
-
+    parser.add_argument('--data_aug',default=1)
     optimizer_args = parser.add_argument_group('Optimizer arguments')
     optimizer_args.add_argument('--lr', '--learning-rate', default=0.1,
-                    type=float, metavar='LR', help='initial learning rate')
+                                type=float, metavar='LR', help='initial learning rate')
     optimizer_args.add_argument('--momentum', default=0.9, type=float,
-                    metavar='M', help='momentum')
+                                metavar='M', help='momentum')
     optimizer_args.add_argument('--weight-decay', '--wd', default=1e-4, type=float,
-                    metavar='W', help='weight decay (default: 1e-4)')
+                                metavar='W', help='weight decay (default: 1e-4)')
 
     parser.add_argument('--print-freq', '-p', default=10, type=int,
                         metavar='N', help='print frequency (default: 10)')
@@ -239,23 +255,23 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
     load_checkpoint_group_exc = load_checkpoint_group.add_mutually_exclusive_group()
     # TODO(barrh): args.deprecated_resume is deprecated since v0.3.1
     load_checkpoint_group_exc.add_argument('--resume', dest='deprecated_resume', default='', type=str,
-                        metavar='PATH', help=argparse.SUPPRESS)
+                                           metavar='PATH', help=argparse.SUPPRESS)
     load_checkpoint_group_exc.add_argument('--resume-from', dest='resumed_checkpoint_path', default='',
-                        type=str, metavar='PATH',
-                        help='path to latest checkpoint. Use to resume paused training session.')
+                                           type=str, metavar='PATH',
+                                           help='path to latest checkpoint. Use to resume paused training session.')
     load_checkpoint_group_exc.add_argument('--exp-load-weights-from', dest='load_model_path',
-                        default='', type=str, metavar='PATH',
-                        help='path to checkpoint to load weights from (excluding other fields) (experimental)')
+                                           default='', type=str, metavar='PATH',
+                                           help='path to checkpoint to load weights from (excluding other fields) (experimental)')
     load_checkpoint_group.add_argument('--pretrained', dest='pretrained', action='store_true',
-                        help='use pre-trained model')
+                                       help='use pre-trained model')
     load_checkpoint_group.add_argument('--reset-optimizer', action='store_true',
-                        help='Flag to override optimizer if resumed from checkpoint. This will reset epochs count.')
+                                       help='Flag to override optimizer if resumed from checkpoint. This will reset epochs count.')
 
     parser.add_argument('-e', '--evaluate', dest='evaluate', action='store_true',
                         help='evaluate model on test set')
     parser.add_argument('--activation-stats', '--act-stats', nargs='+', metavar='PHASE', default=list(),
                         help='collect activation statistics on phases: train, valid, and/or test'
-                        ' (WARNING: this slows down training)')
+                             ' (WARNING: this slows down training)')
     parser.add_argument('--activation-histograms', '--act-hist',
                         type=float_range(exc_min=True),
                         metavar='PORTION_OF_TEST_SET',
@@ -287,8 +303,8 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
                              '(default is to use all available devices)')
     parser.add_argument('--cpu', action='store_true', default=False,
                         help='Use CPU only. \n'
-                        'Flag not set => uses GPUs according to the --gpus flag value.'
-                        'Flag set => overrides the --gpus flag')
+                             'Flag not set => uses GPUs according to the --gpus flag value.'
+                             'Flag set => overrides the --gpus flag')
     parser.add_argument('--name', '-n', metavar='NAME', default=None, help='Experiment name')
     parser.add_argument('--out-dir', '-o', dest='output_dir', default='logs', help='Path to dump logs and checkpoints')
     parser.add_argument('--validation-split', '--valid-size', '--vs', dest='validation_split',
@@ -312,7 +328,7 @@ def init_classifier_compression_arg_parser(include_ptq_lapq_args=False):
                         help='Load a model without DataParallel wrapping it')
     parser.add_argument('--thinnify', dest='thinnify', action='store_true', default=False,
                         help='physically remove zero-filters and create a smaller model')
-    distiller.quantization.add_post_train_quant_args(parser, add_lapq_args=include_ptq_lapq_args)
+    distiller.quantization.add_post_train_quant_args(parser)
     return parser
 
 
@@ -338,7 +354,7 @@ def _init_logger(args, script_dir):
 def _config_determinism(args):
     if args.evaluate:
         args.deterministic = True
-    
+
     # Configure some seed (in case we want to reproduce this experiment session)
     if args.seed is None:
         if args.deterministic:
@@ -347,7 +363,7 @@ def _config_determinism(args):
             args.seed = np.random.randint(1, 100000)
 
     if args.deterministic:
-        distiller.set_deterministic(args.seed) # For experiment reproducability
+        distiller.set_deterministic(args.seed)  # For experiment reproducability
     else:
         distiller.set_seed(args.seed)
         # Turn on CUDNN benchmark mode for best performance. This is usually "safe" for image
@@ -383,7 +399,6 @@ def _init_learner(args):
     model = create_model(args.pretrained, args.dataset, args.arch,
                          parallel=not args.load_serialized, device_ids=args.gpus)
     compression_scheduler = None
-
     # TODO(barrh): args.deprecated_resume is deprecated since v0.3.1
     if args.deprecated_resume:
         msglogger.warning('The "--resume" flag is deprecated. Please use "--resume-from=YOUR_PATH" instead.')
@@ -396,7 +411,8 @@ def _init_learner(args):
     start_epoch = 0
     if args.resumed_checkpoint_path:
         model, compression_scheduler, optimizer, start_epoch = apputils.load_checkpoint(
-            model, args.resumed_checkpoint_path, model_device=args.device)
+            model, args.resumed_checkpoint_path, model_device=args.device,still_quantization=not(args.no_quantization))
+
     elif args.load_model_path:
         model = apputils.load_lean_checkpoint(model, args.load_model_path, model_device=args.device)
     if args.reset_optimizer:
@@ -405,7 +421,7 @@ def _init_learner(args):
             optimizer = None
             msglogger.info('\nreset_optimizer flag set: Overriding resumed optimizer and resetting epoch count to 0')
 
-    if optimizer is None and not args.evaluate:
+    if optimizer is None:
         optimizer = torch.optim.SGD(model.parameters(), lr=args.lr,
                                     momentum=args.momentum, weight_decay=args.weight_decay)
         msglogger.debug('Optimizer Type: %s', type(optimizer))
@@ -415,7 +431,7 @@ def _init_learner(args):
         # The main use-case for this sample application is CNN compression. Compression
         # requires a compression schedule configuration file in YAML.
         compression_scheduler = distiller.file_config(model, optimizer, args.compress, compression_scheduler,
-            (start_epoch-1) if args.resumed_checkpoint_path else None)
+                                                      (start_epoch - 1) if args.resumed_checkpoint_path else None)
         # Model is re-transferred to GPU in case parameters were added (e.g. PACTQuantizer)
         model.to(args.device)
     elif compression_scheduler is None:
@@ -437,21 +453,23 @@ def create_activation_stats_collectors(model, *phases):
 
     WARNING! Enabling activation statsitics collection will significantly slow down training!
     """
+
     class missingdict(dict):
         """This is a little trick to prevent KeyError"""
+
         def __missing__(self, key):
             return None  # note, does *not* set self[key] - we don't want defaultdict's behavior
 
     genCollectors = lambda: missingdict({
-        "sparsity_ofm":      SummaryActivationStatsCollector(model, "sparsity_ofm",
-            lambda t: 100 * distiller.utils.sparsity(t)),
-        "l1_channels":   SummaryActivationStatsCollector(model, "l1_channels",
-                                                         distiller.utils.activation_channels_l1),
+        "sparsity": SummaryActivationStatsCollector(model, "sparsity",
+                                                    lambda t: 100 * distiller.utils.sparsity(t)),
+        "l1_channels": SummaryActivationStatsCollector(model, "l1_channels",
+                                                       distiller.utils.activation_channels_l1),
         "apoz_channels": SummaryActivationStatsCollector(model, "apoz_channels",
                                                          distiller.utils.activation_channels_apoz),
         "mean_channels": SummaryActivationStatsCollector(model, "mean_channels",
                                                          distiller.utils.activation_channels_means),
-        "records":       RecordsActivationStatsCollector(model, classes=[torch.nn.Conv2d])
+        "records": RecordsActivationStatsCollector(model, classes=[torch.nn.Conv2d])
     })
 
     return {k: (genCollectors() if k in phases else missingdict())
@@ -470,25 +488,22 @@ def save_collectors_data(collectors, directory):
 
 
 def load_data(args, fixed_subset=False, sequential=False, load_train=True, load_val=True, load_test=True):
-    test_only = not load_train and not load_val
-
-    train_loader, val_loader, test_loader, _ = apputils.load_data(args.dataset, args.arch,
-                              os.path.expanduser(args.data), args.batch_size,
-                              args.workers, args.validation_split, args.deterministic,
-                              args.effective_train_size, args.effective_valid_size, args.effective_test_size,
-                              fixed_subset, sequential, test_only)
-    if test_only:
-        msglogger.info('Dataset sizes:\n\ttest=%d', len(test_loader.sampler))
-    else:
-        msglogger.info('Dataset sizes:\n\ttraining=%d\n\tvalidation=%d\n\ttest=%d',
-                       len(train_loader.sampler), len(val_loader.sampler), len(test_loader.sampler))
+    train_loader, val_loader, test_loader, _ = apputils.load_data(args.dataset,
+                                                                  os.path.expanduser(args.data), args.batch_size,
+                                                                  args.workers, args.validation_split,
+                                                                  args.deterministic,
+                                                                  args.effective_train_size, args.effective_valid_size,
+                                                                  args.effective_test_size,
+                                                                  fixed_subset, sequential)
+    msglogger.info('Dataset sizes:\n\ttraining=%d\n\tvalidation=%d\n\ttest=%d',
+                   len(train_loader.sampler), len(val_loader.sampler), len(test_loader.sampler))
 
     loaders = (train_loader, val_loader, test_loader)
     flags = (load_train, load_val, load_test)
     loaders = [loaders[i] for i, flag in enumerate(flags) if flag]
-    
+
     if len(loaders) == 1:
-        # Unpack the list for convenience
+        # Unpack the list for convinience
         loaders = loaders[0]
     return loaders
 
@@ -511,6 +526,7 @@ def train(train_loader, model, criterion, optimizer, epoch,
         optimizer.step()
         compression_scheduler.on_minibatch_end(epoch)
     """
+
     def _log_training_progress():
         # Log some statistics
         errs = OrderedDict()
@@ -579,23 +595,13 @@ def train(train_loader, model, criterion, optimizer, epoch,
             output = args.kd_policy.forward(inputs)
 
         if not early_exit_mode(args):
-            # Handle loss calculation for inception models separately due to auxiliary outputs
-            # if user turned off auxiliary classifiers by hand, then loss should be calculated normally,
-            # so, we have this check to ensure we only call this function when output is a tuple
-            if models.is_inception(args.arch) and isinstance(output, tuple):
-                loss = inception_training_loss(output, target, criterion, args)
-            else:
-                loss = criterion(output, target)
+            loss = criterion(output, target)
             # Measure accuracy
-            # For inception models, we only consider accuracy of main classifier
-            if isinstance(output, tuple):
-                classerr.add(output[0].detach(), target)
-            else:
-                classerr.add(output.detach(), target)
+            classerr.add(output.detach(), target)
             acc_stats.append([classerr.value(1), classerr.value(5)])
         else:
             # Measure accuracy and record loss
-            classerr.add(output[args.num_exits-1].detach(), target) # add the last exit (original exit)
+            classerr.add(output[args.num_exits - 1].detach(), target)  # add the last exit (original exit)
             loss = earlyexit_loss(output, target, criterion, args)
         # Record loss
         losses[OBJECTIVE_LOSS_KEY].add(loss.item())
@@ -626,13 +632,13 @@ def train(train_loader, model, criterion, optimizer, epoch,
 
         # measure elapsed time
         batch_time.add(time.time() - end)
-        steps_completed = (train_step+1)
+        steps_completed = (train_step + 1)
 
         if steps_completed % args.print_freq == 0:
             _log_training_progress()
 
         end = time.time()
-    #return acc_stats
+    # return acc_stats
     # NOTE: this breaks previous behavior, which returned a history of (top1, top5) values
     return classerr.value(1), classerr.value(5), losses[OVERALL_LOSS_KEY]
 
@@ -648,6 +654,9 @@ def validate(val_loader, model, criterion, loggers, args, epoch=-1):
 
 def test(test_loader, model, criterion, loggers=None, activations_collectors=None, args=None):
     """Model Test"""
+    import datetime
+    import sys as sys
+    starttime = datetime.datetime.now()
     msglogger.info('--- test ---------------------')
     if args is None:
         args = ClassifierCompressor.mock_args()
@@ -658,6 +667,8 @@ def test(test_loader, model, criterion, loggers=None, activations_collectors=Non
         top1, top5, lossses = _validate(test_loader, model, criterion, loggers, args)
         distiller.log_activation_statistics(-1, "test", loggers, collector=collectors['sparsity'])
         save_collectors_data(collectors, msglogger.logdir)
+    endtime = datetime.datetime.now()
+    msglogger.info('time cost is '+str(endtime - starttime)+' seconds.')
     return top1, top5, lossses
 
 
@@ -717,9 +728,11 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1):
     with torch.no_grad():
         for validation_step, (inputs, target) in enumerate(data_loader):
             inputs, target = inputs.to(args.device), target.to(args.device)
+            # print(inputs.shape,target.shape)
+            # print(target.data)
             # compute output from model
             output = model(inputs)
-
+            # print(output.shape,output.detach().shape,target.shape)
             if not _is_earlyexit(args):
                 # compute loss
                 loss = criterion(output, target)
@@ -735,58 +748,33 @@ def _validate(data_loader, model, criterion, loggers, args, epoch=-1):
             batch_time.add(time.time() - end)
             end = time.time()
 
-            steps_completed = (validation_step+1)
+            steps_completed = (validation_step + 1)
             if steps_completed % args.print_freq == 0:
                 _log_validation_progress()
 
     if not _is_earlyexit(args):
         msglogger.info('==> Top1: %.3f    Top5: %.3f    Loss: %.3f\n',
                        classerr.value()[0], classerr.value()[1], losses['objective_loss'].mean)
-
+        np.set_printoptions(threshold=np.inf)
         if args.display_confusion:
             msglogger.info('==> Confusion:\n%s\n', str(confusion.value()))
+            correct_number = confusion.value().diagonal()
+            accracy = []
+            for line in range(len(confusion.value())):
+                accracy.append(correct_number[line]/confusion.value()[line].sum())
+            msglogger.info('category accuracy is ')
+            msglogger.info(str(accracy))
+            msglogger.info('\n')
+            for item in accracy:
+                print(item,end=' ')
+            std_number=np.std(accracy)
+            msglogger.info('fairness is ')
+            msglogger.info(str(std_number))
+            msglogger.info('\n')
         return classerr.value(1), classerr.value(5), losses['objective_loss'].mean
     else:
         total_top1, total_top5, losses_exits_stats = earlyexit_validate_stats(args)
-        return total_top1, total_top5, losses_exits_stats[args.num_exits-1]
-
-
-def inception_training_loss(output, target, criterion, args):
-    """Compute weighted loss for Inception networks as they have auxiliary classifiers
-
-    Auxiliary classifiers were added to inception networks to tackle the vanishing gradient problem
-    They apply softmax to outputs of one or more intermediate inception modules and compute auxiliary
-    loss over same labels.
-    Note that auxiliary loss is purely used for training purposes, as they are disabled during inference.
-
-    GoogleNet has 2 auxiliary classifiers, hence two 3 outputs in total, output[0] is main classifier output,
-    output[1] is aux2 classifier output and output[2] is aux1 classifier output and the weights of the
-    aux losses are weighted by 0.3 according to the paper (C. Szegedy et al., "Going deeper with convolutions,"
-    2015 IEEE Conference on Computer Vision and Pattern Recognition (CVPR), Boston, MA, 2015, pp. 1-9.)
-
-    All other versions of Inception networks have only one auxiliary classifier, and the auxiliary loss
-    is weighted by 0.4 according to PyTorch documentation
-    # From https://discuss.pytorch.org/t/how-to-optimize-inception-model-with-auxiliary-classifiers/7958
-    """
-    weighted_loss = 0
-    if args.arch == 'googlenet':
-        # DEFAULT, aux classifiers are NOT included in PyTorch Pretrained googlenet model as they are NOT trained,
-        # they are only present if network is trained from scratch. If you need to fine tune googlenet (e.g. after
-        # pruning a pretrained model), then you have to explicitly enable aux classifiers when creating the model
-        # DEFAULT, in case of pretrained model, output length is 1, so loss will be calculated in main training loop
-        # instead of here, as we enter this function only if output is a tuple (len>1)
-        # TODO: Enable user to feed some input to add aux classifiers for pretrained googlenet model
-        outputs, aux2_outputs, aux1_outputs = output    # extract all 3 outputs
-        loss0 = criterion(outputs, target)
-        loss1 = criterion(aux1_outputs, target)
-        loss2 = criterion(aux2_outputs, target)
-        weighted_loss = loss0 + 0.3*loss1 + 0.3*loss2
-    else:
-        outputs, aux_outputs = output    # extract two outputs
-        loss0 = criterion(outputs, target)
-        loss1 = criterion(aux_outputs, target)
-        weighted_loss = loss0 + 0.4*loss1
-    return weighted_loss
+        return total_top1, total_top5, losses_exits_stats[args.num_exits - 1]
 
 
 def earlyexit_loss(output, target, criterion, args):
@@ -798,15 +786,15 @@ def earlyexit_loss(output, target, criterion, args):
     weighted_loss = 0
     sum_lossweights = sum(args.earlyexit_lossweights)
     assert sum_lossweights < 1
-    for exitnum in range(args.num_exits-1):
+    for exitnum in range(args.num_exits - 1):
         if output[exitnum] is None:
             continue
         exit_loss = criterion(output[exitnum], target)
         weighted_loss += args.earlyexit_lossweights[exitnum] * exit_loss
         args.exiterrors[exitnum].add(output[exitnum].detach(), target)
     # handle final exit
-    weighted_loss += (1.0 - sum_lossweights) * criterion(output[args.num_exits-1], target)
-    args.exiterrors[args.num_exits-1].add(output[args.num_exits-1].detach(), target)
+    weighted_loss += (1.0 - sum_lossweights) * criterion(output[args.num_exits - 1], target)
+    args.exiterrors[args.num_exits - 1].add(output[args.num_exits - 1].detach(), target)
     return weighted_loss
 
 
@@ -834,7 +822,7 @@ def earlyexit_validate_loss(output, target, criterion, args):
                                              torch.full([1], target[batch_index], dtype=torch.long))
                 args.exit_taken[exitnum] += 1
                 earlyexit_taken = True
-                break                    # since exit was taken, do not affect the stats of subsequent exits
+                break  # since exit was taken, do not affect the stats of subsequent exits
         # this sample does not exit early and therefore continues until final exit
         if not earlyexit_taken:
             exitnum = args.num_exits - 1
@@ -859,24 +847,16 @@ def earlyexit_validate_stats(args):
     for exitnum in range(args.num_exits):
         if args.exit_taken[exitnum]:
             msglogger.info("Percent Early Exit %d: %.3f", exitnum,
-                           (args.exit_taken[exitnum]*100.0) / sum_exit_stats)
+                           (args.exit_taken[exitnum] * 100.0) / sum_exit_stats)
     total_top1 = 0
     total_top5 = 0
     for exitnum in range(args.num_exits):
         total_top1 += (top1k_stats[exitnum] * (args.exit_taken[exitnum] / sum_exit_stats))
         total_top5 += (top5k_stats[exitnum] * (args.exit_taken[exitnum] / sum_exit_stats))
-        msglogger.info("Accuracy Stats for exit %d: top1 = %.3f, top5 = %.3f", exitnum, top1k_stats[exitnum], top5k_stats[exitnum])
+        msglogger.info("Accuracy Stats for exit %d: top1 = %.3f, top5 = %.3f", exitnum, top1k_stats[exitnum],
+                       top5k_stats[exitnum])
     msglogger.info("Totals for entire network with early exits: top1 = %.3f, top5 = %.3f", total_top1, total_top5)
     return total_top1, total_top5, losses_exits_stats
-
-
-def _convert_ptq_to_pytorch(model, args):
-    msglogger.info('Converting Distiller PTQ model to PyTorch quantization API')
-    dummy_input = distiller.get_dummy_input(input_shape=model.input_shape)
-    model = quantization.convert_distiller_ptq_model_to_pytorch(model, dummy_input, backend=args.qe_pytorch_backend)
-    msglogger.debug('\nModel after conversion:\n{}'.format(model))
-    args.device = 'cpu'
-    return model
 
 
 def evaluate_model(test_loader, model, criterion, loggers, activations_collectors=None, args=None, scheduler=None):
@@ -884,15 +864,12 @@ def evaluate_model(test_loader, model, criterion, loggers, activations_collector
     # the test dataset.
     # You can optionally quantize the model to 8-bit integer before evaluation.
     # For example:
-    # python3 compress_classifier.py --arch resnet20_cifar  ../data.cifar10 -p=50 --resume-from=checkpoint.pth.tar --evaluate
+    # python3 compress_classifier.py --arch resnet20_cifar  ../data.cifar -p=50 --resume-from=checkpoint.pth.tar --evaluate
 
     if not isinstance(loggers, list):
         loggers = [loggers]
 
     if not args.quantize_eval:
-        # Handle case where a post-train quantized model was loaded, and user wants to convert it to PyTorch
-        if args.qe_convert_pytorch:
-            model = _convert_ptq_to_pytorch(model, args)
         return test(test_loader, model, criterion, loggers, activations_collectors, args=args)
     else:
         return quantize_and_test_model(test_loader, model, criterion, args, loggers,
@@ -909,11 +886,6 @@ def quantize_and_test_model(test_loader, model, criterion, args, loggers=None, s
     scheduler - pass scheduler to store it in checkpoint
     save_flag - defaults to save both quantization statistics and checkpoint.
     """
-    if hasattr(model, 'quantizer_metadata') and \
-            model.quantizer_metadata['type'] == distiller.quantization.PostTrainLinearQuantizer:
-        raise RuntimeError('Trying to invoke post-training quantization on a model that has already been post-'
-                           'train quantized. Model was likely loaded from a checkpoint. Please run again without '
-                           'passing the --quantize-eval flag')
     if not (args.qe_dynamic or args.qe_stats_file or args.qe_config_file):
         args_copy = copy.deepcopy(args)
         args_copy.qe_calibration = args.qe_calibration if args.qe_calibration is not None else 0.05
@@ -930,19 +902,16 @@ def quantize_and_test_model(test_loader, model, criterion, args, loggers=None, s
         qe_model = copy.deepcopy(model).to(args.device)
 
     quantizer = quantization.PostTrainLinearQuantizer.from_args(qe_model, args_qe)
-    dummy_input = distiller.get_dummy_input(input_shape=model.input_shape)
-    quantizer.prepare_model(dummy_input)
-
-    if args.qe_convert_pytorch:
-        qe_model = _convert_ptq_to_pytorch(qe_model, args_qe)
+    quantizer.prepare_model(distiller.get_dummy_input(input_shape=model.input_shape))
 
     test_res = test(test_loader, qe_model, criterion, loggers, args=args_qe)
+
 
     if save_flag:
         checkpoint_name = 'quantized'
         apputils.save_checkpoint(0, args_qe.arch, qe_model, scheduler=scheduler,
-            name='_'.join([args_qe.name, checkpoint_name]) if args_qe.name else checkpoint_name,
-            dir=msglogger.logdir, extras={'quantized_top1': test_res[0]})
+                                 name='_'.join([args_qe.name, checkpoint_name]) if args_qe.name else checkpoint_name,
+                                 dir=msglogger.logdir, extras={'quantized_top1': test_res[0]})
 
     del qe_model
     return test_res

@@ -14,10 +14,13 @@
 # limitations under the License.
 #
 
+from .pruner import _ParameterPruner
+from .level_pruner import SparsityLevelParameterPruner
+from distiller.utils import *
+
 import distiller
 
-
-class BaiduRNNPruner(object):
+class BaiduRNNPruner(_ParameterPruner):
     """An element-wise pruner for RNN networks.
 
     Narang, Sharan & Diamos, Gregory & Sengupta, Shubho & Elsen, Erich. (2017).
@@ -50,7 +53,7 @@ class BaiduRNNPruner(object):
     def __init__(self, name, q, ramp_epoch_offset, ramp_slope_mult, weights):
         # Initialize the pruner, using a configuration that originates from the
         # schedule YAML file.
-        self.name = name
+        super(BaiduRNNPruner, self).__init__(name)
         self.params_names = weights
         assert self.params_names
 
@@ -90,4 +93,4 @@ class BaiduRNNPruner(object):
                    self.ramp_slope  * (current_epoch  - ramp_epoch + 1)) / freq
 
         # After computing the threshold, we can create the mask
-        zeros_mask_dict[param_name].mask = distiller.create_mask_threshold_criterion(param, eps)
+        zeros_mask_dict[param_name].mask = distiller.threshold_mask(param.data, eps)

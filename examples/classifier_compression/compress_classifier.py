@@ -58,11 +58,9 @@ import distiller
 from distiller.models import create_model
 import distiller.apputils.image_classifier as classifier
 import distiller.apputils as apputils
-import parser
+import cmdparser
 import os
 import numpy as np
-from ptq_lapq import image_classifier_ptq_lapq
-
 
 # Logger handle
 msglogger = logging.getLogger()
@@ -70,16 +68,16 @@ msglogger = logging.getLogger()
 
 def main():
     # Parse arguments
-    args = parser.add_cmdline_args(classifier.init_classifier_compression_arg_parser(True)).parse_args()
+    args = cmdparser.add_cmdline_args(classifier.init_classifier_compression_arg_parser()).parse_args()
     app = ClassifierCompressorSampleApp(args, script_dir=os.path.dirname(__file__))
     if app.handle_subapps():
         return
     init_knowledge_distillation(app.args, app.model, app.compression_scheduler)
-    app.run_training_loop()
+    app.run_training_loop()  # mark
     # Finally run results on the test set
     return app.test()
 
-    
+
 def handle_subapps(model, criterion, optimizer, compression_scheduler, pylogger, args):
     def load_test_data(args):
         test_loader = classifier.load_data(args, load_train=False, load_val=False, load_test=True)
@@ -89,6 +87,8 @@ def handle_subapps(model, criterion, optimizer, compression_scheduler, pylogger,
     if args.greedy:
         greedy(model, criterion, optimizer, pylogger, args)
         do_exit = True
+
+
     elif args.summary:
         # This sample application can be invoked to produce various summary reports
         for summary in args.summary:
@@ -111,13 +111,116 @@ def handle_subapps(model, criterion, optimizer, compression_scheduler, pylogger,
         sensitivity_analysis(model, criterion, test_loader, pylogger, args, sensitivities)
         do_exit = True
     elif args.evaluate:
-        if args.quantize_eval and args.qe_lapq:
-            image_classifier_ptq_lapq(model, criterion, pylogger, args)
+        def print_size_of_model(model):
+            import torch
+            torch.save(model.state_dict(), "temp.p")
+            size = 'Size (MB):' + str(os.path.getsize("temp.p") / 1e6)
+            os.remove('temp.p')
+            return size
+
+        test_loader = load_test_data(args)
+        import torch.quantization as tq
+        if args.quantized:
+            model = model.to('cpu')
+            qmodel = tq.quantize_dynamic(model, inplace=False)
+            msglogger.info('model before quantized')
+            msglogger.info(print_size_of_model(model))
+            msglogger.info('model is quantized')
+            msglogger.info(print_size_of_model(qmodel))
+            classifier.evaluate_model(test_loader, qmodel, criterion, pylogger,
+                                      classifier.create_activation_stats_collectors(model, *args.activation_stats),
+                                      args, scheduler=compression_scheduler)
+            msglogger.info(args.resumed_checkpoint_path)
+            import copy
+            ADVmodel = copy.deepcopy(model)
+            ADVqmodel = qmodel
         else:
-            test_loader = load_test_data(args)
+            import copy
             classifier.evaluate_model(test_loader, model, criterion, pylogger,
-                classifier.create_activation_stats_collectors(model, *args.activation_stats),
-                args, scheduler=compression_scheduler)
+                                      classifier.create_activation_stats_collectors(model, *args.activation_stats),
+                                      args, scheduler=compression_scheduler)
+            msglogger.info(args.resumed_checkpoint_path)
+            msglogger.info(print_size_of_model(model))
+            ADVmodel = copy.deepcopy(model)
+
+        msglogger.info(args.resumed_checkpoint_path)
+        if args.adv == '1':
+            ADVmodel.eval()
+            import torch.nn as nn
+            import torch.optim as optim
+            from art.attacks import FastGradientMethod
+            from art.classifiers import PyTorchClassifier
+            from art.utils import load_cifar10
+            from art.utils import load_mnist
+            from art.utils import load_iris
+            ADVcriterion = nn.CrossEntropyLoss()
+            ADVoptimizer = optim.SGD(model.parameters(), lr=0.01, momentum=0.5)
+            advinput = (3, 32, 32)
+            classnum = 10
+            print(args.data)
+            if 'cifar' in args.data:
+                (x_train, y_train), (x_test, y_test), min_pixel_value, max_pixel_value = load_cifar10(args.data)
+                x_test = (x_test - 0.5) / 0.5
+            elif 'mnist' in args.data:
+                (x_train, y_train), (x_test, y_test), min_pixel_value, max_pixel_value = load_mnist(args.data)
+                x_test = (x_test - 0.1307) / 0.3081
+                advinput = (1, 28, 28)
+            elif 'imagenet' in args.data:
+                import copy
+                classnum = 1000
+                for validation_step, (inputs, target) in enumerate(test_loader):
+                    # print(validation_step, inputs.shape, target.shape)
+                    if validation_step == 0:
+                        x_test = copy.deepcopy(inputs).numpy()
+                        y_test = copy.deepcopy(target).numpy()
+                    else:
+                        x_temp = copy.deepcopy(inputs).numpy()
+                        y_temp = copy.deepcopy(target).numpy()
+                        x_test = np.append(x_test, x_temp, axis=0)
+                        y_test = np.append(y_test, y_temp, axis=0)
+                        # print(x_test.shape,y_test.shape)
+                        min_pixel_value = 0
+                        max_pixel_value = 1
+            if 'imagenet' not in args.data:
+                x_test = np.swapaxes(x_test, 1, 3).astype(np.float32)
+                x_test = np.swapaxes(x_test, 2, 3).astype(np.float32)
+            # print(x_test.shape, y_test.shape)
+            ADVclassifier = PyTorchClassifier(model=ADVmodel, clip_values=(min_pixel_value, max_pixel_value),
+                                              loss=ADVcriterion,
+                                              optimizer=ADVoptimizer, input_shape=advinput, nb_classes=classnum)
+            if args.quantized:
+                ADVQclassifier = PyTorchClassifier(model=ADVqmodel, clip_values=(min_pixel_value, max_pixel_value),
+                                                   loss=ADVcriterion,
+                                                   optimizer=ADVoptimizer, input_shape=advinput, nb_classes=classnum)
+
+                       # if args.quantized:
+                       #     predictions = ADVQclassifier.predict(x_test_adv,batch_size=args.batch_size)
+                       # else:
+                       #     predictions = ADVclassifier.predict(x_test_adv,batch_size=args.batch_size)
+            predictions=ADVclassifier.predict(x_test,batch_size=args.batch_size)
+            import torchnet.meter as tnt
+            if 'imagenet' in args.data:
+                classerr = tnt.ClassErrorMeter(accuracy=True, topk=(1, 5))
+                classerr.add(predictions, y_test)
+                accuracy = classerr.value()[0]
+            else:
+                accuracy = np.sum(np.argmax(predictions, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
+                print(accuracy)
+
+            attack = FastGradientMethod(classifier=ADVclassifier, eps=0.2)
+            x_test_adv = attack.generate(x=x_test)
+            print('start asv predition')
+            if args.quantized:
+                predictions = ADVQclassifier.predict(x_test_adv, batch_size=args.batch_size)
+            else:
+                predictions = ADVclassifier.predict(x_test_adv, batch_size=args.batch_size)
+            if 'imagenet' in args.data:
+                classerr = tnt.ClassErrorMeter(accuracy=True, topk=(1, 5))
+                classerr.add(predictions, y_test)
+                accuracy = classerr.value()[0]
+            else:
+                accuracy = np.sum(np.argmax(predictions, axis=1) == np.argmax(y_test, axis=1)) / len(y_test)
+            msglogger.info('Accuracy on adversarial test examples: {}%'.format(accuracy))
         do_exit = True
     elif args.thinnify:
         assert args.resumed_checkpoint_path is not None, \
@@ -161,6 +264,7 @@ def early_exit_init(args):
 
 class ClassifierCompressorSampleApp(classifier.ClassifierCompressor):
     def __init__(self, args, script_dir):
+        print(args)
         super().__init__(args, script_dir)
         early_exit_init(self.args)
         # Save the randomly-initialized model before training (useful for lottery-ticket method)
@@ -168,7 +272,6 @@ class ClassifierCompressorSampleApp(classifier.ClassifierCompressor):
             ckpt_name = '_'.join((self.args.name or "", "untrained"))
             apputils.save_checkpoint(0, self.args.arch, self.model,
                                      name=ckpt_name, dir=msglogger.logdir)
-
 
     def handle_subapps(self):
         return handle_subapps(self.model, self.criterion, self.optimizer,
@@ -205,6 +308,28 @@ def greedy(model, criterion, optimizer, loggers, args):
                                                           args.greedy_target_density,
                                                           args.greedy_pruning_step,
                                                           test_fn, train_fn)
+
+
+def start():
+    try:
+        main()
+    except KeyboardInterrupt:
+        print("\n-- KeyboardInterrupt --")
+    except Exception as e:
+        if msglogger is not None:
+            # We catch unhandled exceptions here in order to log them to the log file
+            # However, using the msglogger as-is to do that means we get the trace twice in stdout - once from the
+            # logging operation and once from re-raising the exception. So we remove the stdout logging handler
+            # before logging the exception
+            handlers_bak = msglogger.handlers
+            msglogger.handlers = [h for h in msglogger.handlers if type(h) != logging.StreamHandler]
+            msglogger.error(traceback.format_exc())
+            msglogger.handlers = handlers_bak
+        raise
+    finally:
+        if msglogger is not None and hasattr(msglogger, 'log_filename'):
+            msglogger.info('')
+            msglogger.info('Log file for this run: ' + os.path.realpath(msglogger.log_filename))
 
 
 if __name__ == '__main__':

@@ -26,7 +26,7 @@ This ResNet also has layer gates, to be able to dynamically remove layers.
                Xiangyu Zhang and
                Shaoqing Ren and
                Jian Sun},
-  title     = {Deep Residual Learning for Image Recognition},
+  title     = { },
   booktitle = {{CVPR}},
   pages     = {770--778},
   publisher = {{IEEE} Computer Society},
@@ -39,8 +39,7 @@ import math
 import torch.utils.model_zoo as model_zoo
 from distiller.modules import EltwiseAdd
 
-
-__all__ = ['resnet20_cifar', 'resnet32_cifar', 'resnet44_cifar', 'resnet56_cifar']
+__all__ = ['resnet20_cifar', 'resnet32_cifar', 'resnet44_cifar', 'resnet56_cifar','resnet26_cifar','resnet14_cifar','resnet8_cifar']
 
 NUM_CLASSES = 10
 
@@ -65,7 +64,7 @@ class BasicBlock(nn.Module):
         self.stride = stride
         self.residual_eltwiseadd = EltwiseAdd()
 
-    def forward(self, x):
+    def forward(self, x, fake_relu=False):
         residual = out = x
 
         if self.block_gates[0]:
@@ -81,9 +80,8 @@ class BasicBlock(nn.Module):
             residual = self.downsample(x)
 
         out = self.residual_eltwiseadd(residual, out)
-        out = self.relu2(out)
 
-        return out
+        return self.relu2(out)
 
 
 class ResNetCifar(nn.Module):
@@ -134,7 +132,7 @@ class ResNetCifar(nn.Module):
 
         return nn.Sequential(*layers)
 
-    def forward(self, x):
+    def forward(self, x, with_latent=False, fake_relu=False, no_relu=False):
         x = self.conv1(x)
         x = self.bn1(x)
         x = self.relu(x)
@@ -144,16 +142,23 @@ class ResNetCifar(nn.Module):
         x = self.layer3(x)
 
         x = self.avgpool(x)
-        x = x.view(x.size(0), -1)
-        x = self.fc(x)
-
-        return x
-
-
+        pre_out = x.view(x.size(0), -1)
+        final = self.fc(pre_out)
+        if with_latent:
+            return final, pre_out
+        return final
+def resnet8_cifar(**kwargs):
+    model = ResNetCifar(BasicBlock, [1, 1, 1], **kwargs)
+    return model
+def resnet14_cifar(**kwargs):
+    model = ResNetCifar(BasicBlock, [2, 2, 2], **kwargs)
+    return model
 def resnet20_cifar(**kwargs):
     model = ResNetCifar(BasicBlock, [3, 3, 3], **kwargs)
     return model
-
+def resnet26_cifar(**kwargs):
+    model = ResNetCifar(BasicBlock, [4, 4, 4], **kwargs)
+    return model
 def resnet32_cifar(**kwargs):
     model = ResNetCifar(BasicBlock, [5, 5, 5], **kwargs)
     return model

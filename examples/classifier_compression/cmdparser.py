@@ -16,7 +16,7 @@
 
 import argparse
 import distiller
-import distiller.pruning
+import distiller.quantization
 import distiller.models as models
 
 
